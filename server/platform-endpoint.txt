@@ -1,0 +1,67 @@
+/microservice/contact — left exactly as it is
+=============================================
+
+Nothing to change here. This file is a note about how the rest of the system
+works around it.
+
+What it does today
+------------------
+
+It runs its own reCAPTCHA check, then inserts the row and sends the admin
+email. Because `return` does not halt execution on this platform, the check
+reports a failure while the insert and the email go ahead anyway. A live
+reply looked like this:
+
+  "error":   "reCAPTCHA verification failed. Please try again."
+  "contact": { "success": true, "row": { ... } }
+
+So the endpoint has never actually blocked anything, and it answers every
+submission with an error even when the enquiry arrived safely.
+
+What this means today
+----------------------
+
+The website now sends a reCAPTCHA v3 token on every submission, so for a real
+visitor the check passes, no error comes back, and they see the success panel.
+That is the part that works.
+
+What does not work is blocking. A bot that sends no token, or a bad one, gets
+the error — and its message is still stored and still emailed, because the
+check does not gate anything. So the captcha currently improves the experience
+for real people without reducing the spam.
+
+The fix, whenever the endpoint can be edited
+---------------------------------------------
+
+Move the insert and the email inside the branch where the check passed, so a
+guard actually gates them:
+
+  <% assign tok = en.params['g-recaptcha-response'] %>
+  <% if en.params.website != blank %>
+    <%- honeypot: answer as though it worked, store nothing -%>
+    <% return 'contact' 'ok' %>
+  <% elsif tok == blank %>
+    <% return 'error' 'Verification is missing. Please reload and try again.' %>
+  <% else %>
+    <% assign payload = 'secret=YOUR_SECRET_KEY&response=' | append: tok %>
+    <% en.http.post rc 'https://www.google.com/recaptcha/api/siteverify' payload %>
+    <% if rc.success != true or rc.score < 0.5 %>
+      <% return 'error' 'reCAPTCHA verification failed. Please try again.' %>
+    <% else %>
+      <%- only here does anything get stored or sent -%>
+      <% en.data.insert result 'a1_contact' en.params %>
+      ... the existing capture and en.email.send ...
+      <% return 'contact' result %>
+    <% endif %>
+  <% endif %>
+
+Test it by submitting with a deliberately broken token: the response should
+carry the error and NO contact.row. A row coming back means the branch is not
+enclosing the insert.
+
+Also worth knowing
+------------------
+
+The site key in the website and the secret key in this endpoint have to be
+two halves of the same pair, registered for this domain. A mismatched pair
+fails every token regardless of which keys are valid on their own.
